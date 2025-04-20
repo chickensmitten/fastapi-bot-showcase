@@ -1,0 +1,376 @@
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+import logging
+from typing import Dict, List, Optional
+from pydantic import BaseModel
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+import threading
+import time
+import asyncio
+import json
+from binance import AsyncClient, BinanceSocketManager
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Create FastAPI app
+app = FastAPI(
+    title="Binance Testnet Trading Bot",
+    description="A simple trading bot for Binance Testnet using the official Python client",
+    version="1.0.0"
+)
+
+# Configuration
+# Load environment variables from .env file
+load_dotenv()
+# In production, use environment variables instead of hardcoding
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+DEFAULT_SYMBOL = "BTCUSDT"
+
+# Validate that keys are available
+if not API_KEY or not API_SECRET:
+    raise ValueError("Binance API credentials not found in environment variables")
+
+# Initialize Binance client
+client = Client(API_KEY, API_SECRET, testnet=True)
+
+# Bot state
+bot_running = False
+last_check_time = None
+price_history = []
+trade_history = []
+websocket_running = False
+latest_price = None
+latest_price_time = None
+
+# Models
+class PriceData(BaseModel):
+    symbol: str
+    price: float
+    timestamp: str
+
+class TradeSimulation(BaseModel):
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    timestamp: str
+    order_id: str
+
+class BotStatus(BaseModel):
+    is_running: bool
+    last_check_time: Optional[str] = None
+    price_history: List[PriceData] = []
+    trade_history: List[TradeSimulation] = []
+    websocket_status: bool = False
+    latest_price: Optional[float] = None
+    latest_price_time: Optional[str] = None
+
+# Helper functions
+def get_current_price(symbol: str = DEFAULT_SYMBOL) -> float:
+    """Get current price for a symbol using Binance client."""
+    try:
+        ticker = client.get_symbol_ticker(symbol=symbol)
+        return float(ticker['price'])
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error: {e}")
+        raise HTTPException(status_code=500, detail=f"Binance API error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error getting price: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get price: {str(e)}")
+
+def simulate_trade(symbol: str, side: str, quantity: float, price: float) -> TradeSimulation:
+    """Simulate a trade (no actual order is placed)."""
+    order_id = f"sim_{int(time.time())}_{side}"
+    trade = TradeSimulation(
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=price,
+        timestamp=datetime.now().isoformat(),
+        order_id=order_id
+    )
+    trade_history.append(trade)
+    return trade
+
+def trading_logic(symbol: str = DEFAULT_SYMBOL) -> Optional[TradeSimulation]:
+    """Simple trading logic based on price movements."""
+    global price_history
+    
+    current_price = get_current_price(symbol)
+    timestamp = datetime.now().isoformat()
+    
+    # Record price
+    price_data = PriceData(symbol=symbol, price=current_price, timestamp=timestamp)
+    price_history.append(price_data)
+    
+    # Keep only the last 10 price points
+    if len(price_history) > 10:
+        price_history = price_history[-10:]
+    
+    # Simple trading logic: if we have at least 3 price points
+    if len(price_history) >= 3:
+        # Calculate simple moving average
+        avg_price = sum(p.price for p in price_history[-3:]) / 3
+        
+        # Buy if current price is below average (potential uptrend)
+        if current_price < avg_price * 0.995:
+            logger.info(f"Buy signal: current price {current_price} is below average {avg_price}")
+            return simulate_trade(symbol, "BUY", 0.001, current_price)
+        
+        # Sell if current price is above average (potential downtrend)
+        elif current_price > avg_price * 1.005:
+            logger.info(f"Sell signal: current price {current_price} is above average {avg_price}")
+            return simulate_trade(symbol, "SELL", 0.001, current_price)
+    
+    return None
+
+def bot_loop():
+    """Main bot loop that runs in a separate thread."""
+    global bot_running, last_check_time
+    
+    logger.info("Starting trading bot loop")
+    
+    while bot_running:
+        try:
+            last_check_time = datetime.now().isoformat()
+            trade_result = trading_logic()
+            
+            if trade_result:
+                logger.info(f"Simulated {trade_result.side} trade: {trade_result.quantity} {trade_result.symbol} at {trade_result.price}")
+            
+            # Sleep for 1 minute between checks
+            time.sleep(60)
+        except Exception as e:
+            logger.error(f"Error in bot loop: {e}")
+            time.sleep(10)  # Wait before retrying
+
+# WebSocket price streaming functions
+async def btcusdt_price_socket():
+    """Function to stream BTCUSDT price using WebSockets."""
+    global websocket_running, latest_price, latest_price_time, price_history
+    
+    logger.info("Starting BTCUSDT price WebSocket stream")
+    
+    while websocket_running:
+        try:
+            # Create async client
+            async_client = await AsyncClient.create(API_KEY, API_SECRET, testnet=True)
+            
+            # Initialize socket manager
+            bsm = BinanceSocketManager(async_client)
+            
+            # Start ticker socket for BTCUSDT
+            # Using ticker socket as it updates every second
+            socket = bsm.symbol_ticker_socket(DEFAULT_SYMBOL)
+            
+            async with socket as ts:
+                while websocket_running:
+                    # Receive message from WebSocket
+                    msg = await ts.recv()
+                    
+                    # Extract price information
+                    if msg and 'c' in msg:
+                        price = float(msg['c'])
+                        timestamp = datetime.now().isoformat()
+                        
+                        # Update latest price
+                        latest_price = price
+                        latest_price_time = timestamp
+                        
+                        # Add to price history
+                        price_data = PriceData(
+                            symbol=DEFAULT_SYMBOL,
+                            price=price,
+                            timestamp=timestamp
+                        )
+                        price_history.append(price_data)
+                        
+                        # Keep only the last 100 price points
+                        if len(price_history) > 100:
+                            price_history = price_history[-100:]
+                        
+                        logger.info(f"WebSocket price update: {DEFAULT_SYMBOL} = {price}")
+                        
+                        # Wait for 5 seconds before processing the next update
+                        # This controls the update frequency
+                        await asyncio.sleep(5)
+            
+            # Close the connection
+            await async_client.close_connection()
+            
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}")
+            # Wait before reconnecting
+            await asyncio.sleep(5)
+    
+    logger.info("BTCUSDT price WebSocket stream stopped")
+
+def start_websocket_in_thread():
+    """Start the WebSocket in a separate thread."""
+    def run_async_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(btcusdt_price_socket())
+    
+    websocket_thread = threading.Thread(target=run_async_loop)
+    websocket_thread.daemon = True
+    websocket_thread.start()
+    return websocket_thread
+
+# API Endpoints
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the Binance Testnet Trading Bot API"}
+
+@app.get("/account", response_model=Dict)
+async def get_account_info():
+    """Get account information from Binance Testnet."""
+    try:
+        return client.get_account()
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error: {e}")
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error getting account info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/price/{symbol}")
+async def get_symbol_price(symbol: str = DEFAULT_SYMBOL):
+    """Get current price for a symbol."""
+    price = get_current_price(symbol)
+    return {"symbol": symbol, "price": price, "timestamp": datetime.now().isoformat()}
+
+@app.get("/bot/start")
+async def start_bot(background_tasks: BackgroundTasks):
+    """Start the trading bot."""
+    global bot_running
+    
+    if bot_running:
+        return {"status": "already_running", "message": "Bot is already running"}
+    
+    bot_running = True
+    
+    # Start the bot in a background thread
+    bot_thread = threading.Thread(target=bot_loop)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    return {"status": "started", "message": "Trading bot started successfully"}
+
+@app.get("/bot/stop")
+async def stop_bot():
+    """Stop the trading bot."""
+    global bot_running
+    
+    if not bot_running:
+        return {"status": "not_running", "message": "Bot is not running"}
+    
+    bot_running = False
+    return {"status": "stopped", "message": "Trading bot stopped successfully"}
+
+@app.get("/websocket/start")
+async def start_websocket():
+    """Start the WebSocket price stream."""
+    global websocket_running
+    
+    if websocket_running:
+        return {"status": "already_running", "message": "WebSocket is already running"}
+    
+    websocket_running = True
+    start_websocket_in_thread()
+    
+    return {"status": "started", "message": "WebSocket price stream started successfully"}
+
+@app.get("/websocket/stop")
+async def stop_websocket():
+    """Stop the WebSocket price stream."""
+    global websocket_running
+    
+    if not websocket_running:
+        return {"status": "not_running", "message": "WebSocket is not running"}
+    
+    websocket_running = False
+    return {"status": "stopping", "message": "WebSocket price stream is stopping"}
+
+@app.get("/websocket/price")
+async def get_websocket_price():
+    """Get the latest price from the WebSocket stream."""
+    if not websocket_running:
+        raise HTTPException(status_code=400, detail="WebSocket stream is not running")
+    
+    if latest_price is None:
+        raise HTTPException(status_code=404, detail="No price data available yet")
+    
+    return {
+        "symbol": DEFAULT_SYMBOL,
+        "price": latest_price,
+        "timestamp": latest_price_time
+    }
+
+@app.get("/bot/status", response_model=BotStatus)
+async def get_bot_status():
+    """Get the current status of the trading bot."""
+    return BotStatus(
+        is_running=bot_running,
+        last_check_time=last_check_time,
+        price_history=price_history[-5:] if price_history else [],
+        trade_history=trade_history[-5:] if trade_history else [],
+        websocket_status=websocket_running,
+        latest_price=latest_price,
+        latest_price_time=latest_price_time
+    )
+
+@app.get("/bot/simulate/{side}")
+async def simulate_manual_trade(side: str, symbol: str = DEFAULT_SYMBOL, quantity: float = 0.001):
+    """Manually simulate a trade."""
+    if side.upper() not in ["BUY", "SELL"]:
+        raise HTTPException(status_code=400, detail="Side must be BUY or SELL")
+    
+    current_price = get_current_price(symbol)
+    trade = simulate_trade(symbol, side.upper(), quantity, current_price)
+    
+    return trade
+
+@app.get("/markets")
+async def get_exchange_info():
+    """Get information about available trading pairs."""
+    try:
+        exchange_info = client.get_exchange_info()
+        symbols = [s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING']
+        return {"trading_pairs": symbols}
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error: {e}")
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error getting exchange info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Start the WebSocket stream when the application starts
+@app.on_event("startup")
+async def startup_event():
+    global websocket_running
+    websocket_running = True
+    start_websocket_in_thread()
+    logger.info("WebSocket price stream started automatically on startup")
+
+# Stop the WebSocket stream when the application shuts down
+@app.on_event("shutdown")
+async def shutdown_event():
+    global websocket_running
+    websocket_running = False
+    logger.info("WebSocket price stream stopped on shutdown")
+
+# For running the application directly
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+

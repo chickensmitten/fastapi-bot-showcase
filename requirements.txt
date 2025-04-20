@@ -1,0 +1,3 @@
+fastapi[standard]
+python-binance
+python-dotenv
