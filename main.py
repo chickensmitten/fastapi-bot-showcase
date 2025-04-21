@@ -235,7 +235,7 @@ async def root():
 async def get_account_info():
     """Get account information from Binance Testnet."""
     try:
-        return client.get_account()
+        return client.futures_account()
     except BinanceAPIException as e:
         logger.error(f"Binance API error: {e}")
         raise HTTPException(status_code=e.status_code, detail=str(e))
