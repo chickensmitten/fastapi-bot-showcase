@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import threading
 import time
+import schedule
 import asyncio
 import json
 from binance import AsyncClient, BinanceSocketManager
@@ -101,6 +102,44 @@ def simulate_trade(symbol: str, side: str, quantity: float, price: float) -> Tra
     trade_history.append(trade)
     return trade
 
+def execute_trade(symbol: str, side: str, quantity: float, price: float) -> TradeSimulation:
+    """Execute an actual trade on Binance Futures with 2x leverage."""
+    try:
+        # Always verify leverage before placing an order
+        set_and_verify_leverage(symbol, 2)
+        
+        # Determine order side in Binance format
+        order_side = "BUY" if side.upper() == "BUY" else "SELL"
+        
+        # Place the order
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=order_side,
+            type="MARKET",  # Using market orders for simplicity
+            quantity=quantity
+        )
+        
+        # Create a trade record
+        trade = TradeSimulation(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            timestamp=datetime.now().isoformat(),
+            order_id=str(order['orderId'])
+        )
+        
+        trade_history.append(trade)
+        return trade
+    
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error: {e}")
+        raise HTTPException(status_code=500, detail=f"Binance API error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error executing trade: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to execute trade: {str(e)}")
+
+
 def trading_logic(symbol: str = DEFAULT_SYMBOL) -> Optional[TradeSimulation]:
     """Simple trading logic based on price movements."""
     global price_history
@@ -133,15 +172,96 @@ def trading_logic(symbol: str = DEFAULT_SYMBOL) -> Optional[TradeSimulation]:
     
     return None
 
+# Add this function to set and maintain leverage
+def set_and_verify_leverage(symbol="BTCUSDT", target_leverage=2):
+    """Set and verify leverage for the specified symbol"""
+    try:
+        # Set leverage to target value
+        response = client.futures_change_leverage(
+            symbol=symbol, 
+            leverage=target_leverage
+        )
+        
+        # Verify the leverage was set correctly
+        current_leverage = int(response['leverage'])
+        
+        if current_leverage == target_leverage:
+            logger.info(f"Successfully set {symbol} leverage to {target_leverage}x")
+            return True
+        else:
+            logger.error(f"Failed to set leverage. Current: {current_leverage}x, Target: {target_leverage}x")
+            return False
+            
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error setting leverage: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error setting leverage: {e}")
+        return False
+
+# Add a function to periodically check and maintain leverage
+def leverage_maintenance_task():
+    """Check and reset leverage to 2x if needed"""
+    try:
+        # Get current position information
+        positions = client.futures_position_information(symbol=DEFAULT_SYMBOL)
+        
+        # Find our symbol position
+        for position in positions:
+            if position['symbol'] == DEFAULT_SYMBOL:
+                current_leverage = int(position['leverage'])
+                logger.info(f"Current leverage for {DEFAULT_SYMBOL}: {current_leverage}x")
+                
+                # If leverage is not 2x, reset it
+                if current_leverage != 2:
+                    logger.warning(f"Leverage drift detected! Resetting from {current_leverage}x to 2x")
+                    set_and_verify_leverage(DEFAULT_SYMBOL, 2)
+                    
+                return
+                
+        # If no position found, still set the default leverage
+        logger.info(f"No position found for {DEFAULT_SYMBOL}, setting default leverage to 2x")
+        set_and_verify_leverage(DEFAULT_SYMBOL, 2)
+        
+    except Exception as e:
+        logger.error(f"Error in leverage maintenance task: {e}")
+
+# Start a background thread for leverage maintenance
+def start_leverage_maintenance():
+    """Start the leverage maintenance background task"""
+    def run_maintenance():
+        # Initial setup
+        set_and_verify_leverage(DEFAULT_SYMBOL, 2)
+        
+        # Schedule to check every minute
+        schedule.every(1).minutes.do(leverage_maintenance_task)
+        
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    
+    maintenance_thread = threading.Thread(target=run_maintenance)
+    maintenance_thread.daemon = True
+    maintenance_thread.start()
+    logger.info("Leverage maintenance service started")
+
 def bot_loop():
     """Main bot loop that runs in a separate thread."""
     global bot_running, last_check_time
     
     logger.info("Starting trading bot loop")
+
+    # Ensure leverage is set properly at bot start
+    set_and_verify_leverage(DEFAULT_SYMBOL, 2)
     
     while bot_running:
         try:
             last_check_time = datetime.now().isoformat()
+
+            # Always verify leverage before trading
+            leverage_maintenance_task()
+
+            # Execute trading logic
             trade_result = trading_logic()
             
             if trade_result:
@@ -277,6 +397,27 @@ async def stop_bot():
     bot_running = False
     return {"status": "stopped", "message": "Trading bot stopped successfully"}
 
+@app.get("/bot/execute/{side}")
+async def execute_manual_trade(side: str, symbol: str = DEFAULT_SYMBOL, quantity: float = 0.001):
+    """Manually execute a trade with 2x leverage."""
+    if side.upper() not in ["BUY", "SELL"]:
+        raise HTTPException(status_code=400, detail="Side must be BUY or SELL")
+    
+    # Ensure leverage is set to 2x
+    if not set_and_verify_leverage(symbol, 2):
+        raise HTTPException(status_code=500, detail="Failed to set leverage to 2x")
+    
+    current_price = get_current_price(symbol)
+    
+    # For real trading, use the execute_trade function
+    # For simulation, use the simulate_trade function
+    
+    # Uncomment the relevant line:
+    # trade = execute_trade(symbol, side.upper(), quantity, current_price)
+    trade = simulate_trade(symbol, side.upper(), quantity, current_price)
+    
+    return trade
+
 @app.get("/websocket/start")
 async def start_websocket():
     """Start the WebSocket price stream."""
@@ -353,11 +494,50 @@ async def get_exchange_info():
     except Exception as e:
         logger.error(f"Error getting exchange info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/leverage/status")
+async def get_leverage_status(symbol: str = DEFAULT_SYMBOL):
+    """Get current leverage settings for the specified symbol."""
+    try:
+        positions = client.futures_position_information(symbol=symbol)
+        
+        for position in positions:
+            if position['symbol'] == symbol:
+                return {
+                    "symbol": symbol,
+                    "current_leverage": int(position['leverage']),
+                    "target_leverage": 2,
+                    "margin_type": position['marginType'],
+                    "position_amount": float(position['positionAmt']),
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+        # If no position found
+        return {
+            "symbol": symbol,
+            "current_leverage": "No position found",
+            "target_leverage": 2,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting leverage status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Start the WebSocket stream when the application starts
 @app.on_event("startup")
 async def startup_event():
     global websocket_running
+
+    # Set leverage for BTCUSDT to 2x
+    set_and_verify_leverage(DEFAULT_SYMBOL, 2)
+    logger.info(f"Set {DEFAULT_SYMBOL} leverage to 2x on startup")
+    
+    # Start leverage maintenance service
+    start_leverage_maintenance()
+    logger.info("Leverage maintenance service started")
+
     websocket_running = True
     start_websocket_in_thread()
     logger.info("WebSocket price stream started automatically on startup")
