@@ -13,7 +13,7 @@ import schedule
 import asyncio
 import json
 from binance import AsyncClient, BinanceSocketManager
-import pdb; pdb.set_trace()
+# import pdb; pdb.set_trace()
 
 # Configure logging
 logging.basicConfig(
