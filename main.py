@@ -106,6 +106,9 @@ def simulate_trade(symbol: str, side: str, quantity: float, price: float) -> Tra
 def execute_trade(symbol: str, side: str, quantity: float, price: float) -> TradeSimulation:
     """Execute an actual trade on Binance Futures with 2x leverage."""
     try:
+        # Ensure margin mode is ISOLATED
+        set_margin_mode_isolated(symbol)
+
         # Always verify leverage before placing an order
         set_and_verify_leverage(symbol, 2)
         
@@ -200,6 +203,30 @@ def set_and_verify_leverage(symbol="BTCUSDT", target_leverage=2):
         logger.error(f"Unexpected error setting leverage: {e}")
         return False
 
+# Add this function to ensure the margin is isolated and not crossed
+def set_margin_mode_isolated(symbol: str):
+    """Set margin mode to ISOLATED for a symbol."""
+    try:
+        response = client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
+        if response.get('code') == 200 or response.get('msg') == 'success':
+            logger.info(f"Margin mode set to ISOLATED for {symbol}")
+            return True
+        else:
+            logger.error(f"Failed to set margin mode to ISOLATED for {symbol}: {response}")
+            return False
+    except BinanceAPIException as e:
+        # Handle the case where margin mode is already set to ISOLATED
+        if e.code == -4046:  # "No need to change margin type."
+            logger.info(f"Margin mode is already ISOLATED for {symbol}")
+            return True
+        else:
+            logger.error(f"Binance API Exception setting margin mode to ISOLATED for {symbol}: {e}")
+            return False
+    except Exception as e:
+        logger.error(f"Exception setting margin mode to ISOLATED for {symbol}: {e}")
+        return False
+
+
 # Add a function to periodically check and maintain leverage
 def enhanced_leverage_maintenance_task():
     """Check and maintain 2x effective leverage by closing and reopening positions if needed."""
@@ -253,6 +280,9 @@ def maintain_position_value_with_2x_leverage(direction, previous_position_value)
         previous_position_value: The value of the previous position to maintain
     """
     try:
+        # Ensure margin mode is ISOLATED
+        set_margin_mode_isolated(DEFAULT_SYMBOL)
+
         # Ensure leverage is set to 2x
         set_and_verify_leverage(DEFAULT_SYMBOL, 2)
         
@@ -351,7 +381,10 @@ def open_new_position_with_2x_leverage(direction="BUY", allocation_percentage=10
     try:
         # Ensure leverage is set to 2x
         set_and_verify_leverage(DEFAULT_SYMBOL, 2)
-        
+
+        # Set margin mode to ISOLATED
+        set_margin_mode_isolated(DEFAULT_SYMBOL)
+
         # Get account information to calculate position size
         account = client.futures_account()
         available_balance = float(account['availableBalance'])
@@ -427,6 +460,9 @@ def bot_loop():
     global bot_running, last_check_time
     
     logger.info("Starting trading bot loop")
+    
+    # Ensure margin mode is ISOLATED
+    set_margin_mode_isolated(DEFAULT_SYMBOL)
 
     # Ensure leverage is set properly at bot start
     set_and_verify_leverage(DEFAULT_SYMBOL, 2)
@@ -579,10 +615,12 @@ async def execute_manual_trade(side: str, symbol: str = DEFAULT_SYMBOL, quantity
     """Manually execute a trade with 2x leverage."""
     if side.upper() not in ["BUY", "SELL"]:
         raise HTTPException(status_code=400, detail="Side must be BUY or SELL")
-    
+
+    # Ensure margin is isolated
+    set_margin_mode_isolated(symbol)
+
     # Ensure leverage is set to 2x
-    if not set_and_verify_leverage(symbol, 2):
-        raise HTTPException(status_code=500, detail="Failed to set leverage to 2x")
+    set_and_verify_leverage(symbol, 2)
     
     current_price = get_current_price(symbol)
     
@@ -710,6 +748,10 @@ async def startup_event():
 
     # Close any existing positions
     close_all_btcusdt_positions()
+
+    # Set margin mode to ISOLATED
+    set_margin_mode_isolated(DEFAULT_SYMBOL)
+    logger.info(f"Set {DEFAULT_SYMBOL} with isolated margin on startup")
 
     # Set leverage for BTCUSDT to 2x
     set_and_verify_leverage(DEFAULT_SYMBOL, 2)
