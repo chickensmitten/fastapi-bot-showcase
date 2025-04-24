@@ -13,6 +13,7 @@ import schedule
 import asyncio
 import json
 from binance import AsyncClient, BinanceSocketManager
+import pdb; pdb.set_trace()
 
 # Configure logging
 logging.basicConfig(
@@ -200,41 +201,97 @@ def set_and_verify_leverage(symbol="BTCUSDT", target_leverage=2):
         return False
 
 # Add a function to periodically check and maintain leverage
-def leverage_maintenance_task():
-    """Check and reset leverage to 2x if needed"""
+def enhanced_leverage_maintenance_task():
+    """Check and maintain 2x effective leverage by closing and reopening positions if needed."""
     try:
-        # Get current position information
-        positions = client.futures_position_information(symbol=DEFAULT_SYMBOL)
+        # Calculate current effective leverage
+        effective_leverage = calculate_effective_leverage(DEFAULT_SYMBOL)
         
-        # Find our symbol position
-        for position in positions:
-            if position['symbol'] == DEFAULT_SYMBOL:
-                current_leverage = int(position['leverage'])
-                logger.info(f"Current leverage for {DEFAULT_SYMBOL}: {current_leverage}x")
-                
-                # If leverage is not 2x, reset it
-                if current_leverage != 2:
-                    logger.warning(f"Leverage drift detected! Resetting from {current_leverage}x to 2x")
-                    set_and_verify_leverage(DEFAULT_SYMBOL, 2)
+        # If no position exists, open one
+        if effective_leverage == 0:
+            logger.info("No position exists, opening new position with 2x leverage")
+            open_new_position_with_2x_leverage()
+            return
+            
+        # If leverage has drifted more than 10% from target (1.8x to 2.2x acceptable range)
+        if effective_leverage is not None and (effective_leverage < 1.8 or effective_leverage > 2.2):
+            logger.warning(f"Leverage drift detected! Current: {effective_leverage:.2f}x, Target: 2.00x")
+            logger.info("Rebalancing position to maintain 2x leverage")
+            
+            # Store current direction before closing
+            positions = client.futures_position_information(symbol=DEFAULT_SYMBOL)
+            for position in positions:
+                if position['symbol'] == DEFAULT_SYMBOL and float(position['positionAmt']) != 0:
+                    current_direction = "BUY" if float(position['positionAmt']) > 0 else "SELL"
                     
-                return
-                
-        # If no position found, still set the default leverage
-        logger.info(f"No position found for {DEFAULT_SYMBOL}, setting default leverage to 2x")
+                    position_amount = abs(float(position['positionAmt']))
+                    mark_price = float(position['markPrice'])
+                    
+                    # Calculate current position value
+                    position_value = position_amount * mark_price
+                    
+                    # Close all existing positions
+                    if close_all_btcusdt_positions():
+                        # Calculate new position size at 2x leverage
+                        # We need to maintain the same position value
+                        new_position_size = maintain_position_value_with_2x_leverage(
+                            direction=current_direction,
+                            previous_position_value=position_value
+                        )
+                    break
+        else:
+            logger.info(f"Current leverage {effective_leverage:.2f}x is within acceptable range of 2x target")
+            
+    except Exception as e:
+        logger.error(f"Error in enhanced leverage maintenance task: {e}")
+
+def maintain_position_value_with_2x_leverage(direction, previous_position_value):
+    """Open a new position maintaining the same position value but with 2x leverage.
+    
+    Args:
+        direction: "BUY" or "SELL" direction
+        previous_position_value: The value of the previous position to maintain
+    """
+    try:
+        # Ensure leverage is set to 2x
         set_and_verify_leverage(DEFAULT_SYMBOL, 2)
         
+        # Get current price
+        current_price = get_current_price(DEFAULT_SYMBOL)
+        
+        # Calculate position size in BTC to maintain same position value
+        position_size = previous_position_value / current_price
+        
+        # Round to appropriate precision (usually 3 decimal places for BTC)
+        position_size = round(position_size, 3)
+        
+        logger.info(f"Opening new {direction} position with consistent value: {position_size} {DEFAULT_SYMBOL} at {current_price}")
+        
+        # Create the new position
+        order = client.futures_create_order(
+            symbol=DEFAULT_SYMBOL,
+            side=direction,
+            type="MARKET",
+            quantity=position_size
+        )
+        
+        logger.info(f"New position opened with order ID: {order['orderId']}")
+        return True
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error opening position: {e}")
+        return False
     except Exception as e:
-        logger.error(f"Error in leverage maintenance task: {e}")
+        logger.error(f"Error opening position: {e}")
+        return False
 
 # Start a background thread for leverage maintenance
 def start_leverage_maintenance():
     """Start the leverage maintenance background task"""
     def run_maintenance():
-        # Initial setup
-        set_and_verify_leverage(DEFAULT_SYMBOL, 2)
-        
+
         # Schedule to check every minute
-        schedule.every(1).minutes.do(leverage_maintenance_task)
+        schedule.every(1).minutes.do(enhanced_leverage_maintenance_task)
         
         while True:
             schedule.run_pending()
@@ -244,6 +301,126 @@ def start_leverage_maintenance():
     maintenance_thread.daemon = True
     maintenance_thread.start()
     logger.info("Leverage maintenance service started")
+
+def close_all_btcusdt_positions():
+    """Close all existing BTCUSDT positions."""
+    try:
+        # Get current positions
+        positions = client.futures_position_information(symbol=DEFAULT_SYMBOL)
+        
+        for position in positions:
+            if position['symbol'] == DEFAULT_SYMBOL and float(position['positionAmt']) != 0:
+                logger.info(f"Found existing position: {position['positionAmt']} {DEFAULT_SYMBOL}")
+                
+                # Determine the close direction (opposite of current position)
+                close_side = "SELL" if float(position['positionAmt']) > 0 else "BUY"
+                
+                # Get absolute position size
+                position_size = abs(float(position['positionAmt']))
+                
+                logger.info(f"Closing position with {close_side} order of {position_size} {DEFAULT_SYMBOL}")
+                
+                # Execute closing order
+                order = client.futures_create_order(
+                    symbol=DEFAULT_SYMBOL,
+                    side=close_side,
+                    type="MARKET",
+                    quantity=position_size
+                )
+                
+                logger.info(f"Position closed with order ID: {order['orderId']}")
+                return True
+                
+        logger.info(f"No open {DEFAULT_SYMBOL} positions found to close")
+        return False
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error closing positions: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error closing positions: {e}")
+        return False
+
+def open_new_position_with_2x_leverage(direction="BUY", allocation_percentage=10):
+    """Open a new BTCUSDT position with exactly 2x leverage.
+    
+    Args:
+        direction: "BUY" for long position, "SELL" for short position
+        allocation_percentage: Percentage of available balance to allocate to this position
+    """
+    try:
+        # Ensure leverage is set to 2x
+        set_and_verify_leverage(DEFAULT_SYMBOL, 2)
+        
+        # Get account information to calculate position size
+        account = client.futures_account()
+        available_balance = float(account['availableBalance'])
+        
+        # Calculate allocation amount (e.g., 10% of available balance)
+        allocation = available_balance * (allocation_percentage / 100)
+        
+        # Get current price
+        current_price = get_current_price(DEFAULT_SYMBOL)
+        
+        # Calculate position size in BTC
+        # For 2x leverage: position_size = (allocation * 2) / price
+        position_size = (allocation * 2) / current_price
+        
+        # Round to appropriate precision (usually 3 decimal places for BTC)
+        position_size = round(position_size, 3)
+        
+        logger.info(f"Opening new {direction} position: {position_size} {DEFAULT_SYMBOL} at {current_price}")
+        
+        # Create the new position
+        order = client.futures_create_order(
+            symbol=DEFAULT_SYMBOL,
+            side=direction,
+            type="MARKET",
+            quantity=position_size
+        )
+        
+        logger.info(f"New position opened with order ID: {order['orderId']}")
+        return True
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error opening position: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error opening position: {e}")
+        return False
+
+def calculate_effective_leverage(symbol=DEFAULT_SYMBOL):
+    """Calculate the actual effective leverage of the current position."""
+    try:
+        # Get position information
+        positions = client.futures_position_information(symbol=symbol)
+        
+        # Get account information
+        account = client.futures_account()
+        wallet_balance = float(account['totalWalletBalance'])
+        
+        for position in positions:
+            if position['symbol'] == symbol and float(position['positionAmt']) != 0:
+                # Get position details
+                position_amount = abs(float(position['positionAmt']))
+                mark_price = float(position['markPrice'])
+                
+                # Calculate position value
+                position_value = position_amount * mark_price
+                
+                # Calculate effective leverage
+                effective_leverage = position_value / wallet_balance
+                
+                logger.info(f"Current effective leverage: {effective_leverage:.2f}x (Position: {position_value}, Balance: {wallet_balance})")
+                return effective_leverage
+                
+        logger.info(f"No open position found for {symbol}")
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error calculating effective leverage: {e}")
+        return None
+
 
 def bot_loop():
     """Main bot loop that runs in a separate thread."""
@@ -259,7 +436,7 @@ def bot_loop():
             last_check_time = datetime.now().isoformat()
 
             # Always verify leverage before trading
-            leverage_maintenance_task()
+            enhanced_leverage_maintenance_task()
 
             # Execute trading logic
             trade_result = trading_logic()
@@ -529,14 +706,22 @@ async def get_leverage_status(symbol: str = DEFAULT_SYMBOL):
 @app.on_event("startup")
 async def startup_event():
     global websocket_running
+    logger.info("Starting application and initializing 2x leveraged BTCUSDT position")
+
+    # Close any existing positions
+    close_all_btcusdt_positions()
 
     # Set leverage for BTCUSDT to 2x
     set_and_verify_leverage(DEFAULT_SYMBOL, 2)
     logger.info(f"Set {DEFAULT_SYMBOL} leverage to 2x on startup")
     
+    # Open a new position with 2x leverage
+    open_new_position_with_2x_leverage()    
+    logger.info(f"Open new position with 2x leverage")
+    
     # Start leverage maintenance service
     start_leverage_maintenance()
-    logger.info("Leverage maintenance service started")
+    logger.info("Enhanced leverage maintenance service started")
 
     websocket_running = True
     start_websocket_in_thread()
