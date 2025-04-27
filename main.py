@@ -484,51 +484,11 @@ def start_websocket_in_thread():
 async def root():
     return {"message": "Welcome to the Binance Testnet Trading Bot API"}
 
-# @app.get("/account", response_model=Dict)
-# async def get_account_info():
-#     """Get account information from Binance Testnet."""
-#     try:
-#         return client.futures_account()
-#     except BinanceAPIException as e:
-#         logger.error(f"Binance API error: {e}")
-#         raise HTTPException(status_code=e.status_code, detail=str(e))
-#     except Exception as e:
-#         logger.error(f"Error getting account info: {e}")
-#         raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/price/{symbol}")
 async def get_symbol_price(symbol: str = DEFAULT_SYMBOL):
     """Get current price for a symbol."""
     price = get_current_price(symbol)
     return {"symbol": symbol, "price": price, "timestamp": datetime.now().isoformat()}
-
-@app.get("/bot/start")
-async def start_bot(background_tasks: BackgroundTasks):
-    """Start the trading bot."""
-    global bot_running
-    
-    if bot_running:
-        return {"status": "already_running", "message": "Bot is already running"}
-    
-    bot_running = True
-    
-    # Start the bot in a background thread
-    bot_thread = threading.Thread(target=bot_loop)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
-    return {"status": "started", "message": "Trading bot started successfully"}
-
-@app.get("/bot/stop")
-async def stop_bot():
-    """Stop the trading bot."""
-    global bot_running
-    
-    if not bot_running:
-        return {"status": "not_running", "message": "Bot is not running"}
-    
-    bot_running = False
-    return {"status": "stopped", "message": "Trading bot stopped successfully"}
 
 @app.get("/websocket/start")
 async def start_websocket():
