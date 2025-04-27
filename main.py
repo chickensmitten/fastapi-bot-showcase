@@ -261,10 +261,13 @@ def enhanced_leverage_maintenance_task():
                     if close_all_btcusdt_positions():
                         # Calculate new position size at 2x leverage
                         # We need to maintain the same position value
-                        new_position_size = maintain_position_value_with_2x_leverage(
+                        position_maintained_successfully = maintain_position_value_with_2x_leverage(
                             direction=current_direction,
                             previous_position_value=position_value
                         )
+
+                        if not position_maintained_successfully:
+                            logger.error("Failed to maintain position with 2x leverage")
                     break
         else:
             logger.info(f"Current leverage {effective_leverage:.2f}x is within acceptable range of 2x target")
@@ -391,6 +394,10 @@ def open_new_position_with_2x_leverage(direction="BUY", allocation_percentage=10
         
         # Calculate allocation amount (e.g., 10% of available balance)
         allocation = available_balance * (allocation_percentage / 100)
+        logger.info(f"""
+            Available Balance: {available_balance}
+            Allocation: {allocation}        
+        """)
         
         # Get current price
         current_price = get_current_price(DEFAULT_SYMBOL)
