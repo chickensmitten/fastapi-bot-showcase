@@ -452,10 +452,12 @@ async def btcusdt_price_socket():
                         # Keep only the last 100 price points
                         if len(price_history) > 100:
                             price_history = price_history[-100:]
+
+                        logger.info(f"WebSocket price update: {DEFAULT_SYMBOL} = {price}")
                         
                         # Wait for 5 seconds before processing the next update
                         # This controls the update frequency
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(30)
             
             # Close the connection
             await async_client.close_connection()
