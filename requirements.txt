@@ -1,3 +1,4 @@
 fastapi[standard]
 python-binance
 python-dotenv
+schedule==1.2.0  # Use the latest version
