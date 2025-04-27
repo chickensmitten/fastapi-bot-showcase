@@ -13,7 +13,7 @@ import schedule
 import asyncio
 import json
 from binance import AsyncClient, BinanceSocketManager
-# import pdb; pdb.set_trace() # this is breakpoint
+import pdb # breakpoint code # pdb.set_trace()
 
 # Configure logging
 logging.basicConfig(
@@ -89,60 +89,6 @@ def get_current_price(symbol: str = DEFAULT_SYMBOL) -> float:
         logger.error(f"Error getting price: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get price: {str(e)}")
 
-def simulate_trade(symbol: str, side: str, quantity: float, price: float) -> TradeSimulation:
-    """Simulate a trade (no actual order is placed)."""
-    order_id = f"sim_{int(time.time())}_{side}"
-    trade = TradeSimulation(
-        symbol=symbol,
-        side=side,
-        quantity=quantity,
-        price=price,
-        timestamp=datetime.now().isoformat(),
-        order_id=order_id
-    )
-    trade_history.append(trade)
-    return trade
-
-def execute_trade(symbol: str, side: str, quantity: float, price: float) -> TradeSimulation:
-    """Execute an actual trade on Binance Futures with 2x leverage."""
-    try:
-        # Ensure margin mode is ISOLATED
-        set_margin_mode_isolated(symbol)
-
-        # Always verify leverage before placing an order
-        set_and_verify_leverage(symbol, 2)
-        
-        # Determine order side in Binance format
-        order_side = "BUY" if side.upper() == "BUY" else "SELL"
-        
-        # Place the order
-        order = client.futures_create_order(
-            symbol=symbol,
-            side=order_side,
-            type="MARKET",  # Using market orders for simplicity
-            quantity=quantity
-        )
-        
-        # Create a trade record
-        trade = TradeSimulation(
-            symbol=symbol,
-            side=side,
-            quantity=quantity,
-            price=price,
-            timestamp=datetime.now().isoformat(),
-            order_id=str(order['orderId'])
-        )
-        
-        trade_history.append(trade)
-        return trade
-    
-    except BinanceAPIException as e:
-        logger.error(f"Binance API error: {e}")
-        raise HTTPException(status_code=500, detail=f"Binance API error: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error executing trade: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to execute trade: {str(e)}")
-
 # Add this function to set and maintain leverage
 def set_and_verify_leverage(symbol="BTCUSDT", target_leverage=2):
     """Set and verify leverage for the specified symbol"""
@@ -207,8 +153,8 @@ def enhanced_leverage_maintenance_task():
             open_new_position_with_2x_leverage()
             return
             
-        # If leverage has drifted more than 10% from target (1.8x to 2.2x acceptable range)
-        if effective_leverage is not None and (effective_leverage < 1.8 or effective_leverage > 2.2):
+        # If leverage has drifted more than 10% from target (1.9x to 2.1x acceptable range)
+        if effective_leverage is not None and (effective_leverage < 1.9 or effective_leverage > 2.1):
             logger.warning(f"Leverage drift detected! Current: {effective_leverage:.2f}x, Target: 2.00x")
             logger.info("Rebalancing position to maintain 2x leverage")
             
@@ -401,24 +347,32 @@ def calculate_effective_leverage(symbol=DEFAULT_SYMBOL):
     try:
         # Get position information
         positions = client.futures_position_information(symbol=symbol)
-        
-        # Get account information
-        account = client.futures_account()
-        wallet_balance = float(account['totalWalletBalance'])
-        
+                
         for position in positions:
             if position['symbol'] == symbol and float(position['positionAmt']) != 0:
                 # Get position details
                 position_amount = abs(float(position['positionAmt']))
                 mark_price = float(position['markPrice'])
-                
+
                 # Calculate position value
                 position_value = position_amount * mark_price
+
+                # Get the margin used for this position (use isolatedWallet for isolated margin)
+                if 'isolatedWallet' in position and float(position['isolatedWallet']) > 0:
+                    margin_used = float(position['isolatedWallet'])
+                else:
+                    # If isolatedWallet is not available, calculate based on the leverage setting
+                    leverage_setting = int(position['leverage'])
+                    margin_used = position_value / leverage_setting
                 
                 # Calculate effective leverage
-                effective_leverage = position_value / wallet_balance
-                
-                logger.info(f"Current effective leverage: {effective_leverage:.2f}x (Position: {position_value}, Balance: {wallet_balance})")
+                effective_leverage = position_value / margin_used
+                logger.info(f"""
+                    Position Value: {position_value}
+                    Position Amount: {position_amount}
+                    Margin Used: {margin_used}
+                    Current effective leverage: {effective_leverage:.2f}x
+                """)
                 return effective_leverage
                 
         logger.info(f"No open position found for {symbol}")
@@ -499,8 +453,6 @@ async def btcusdt_price_socket():
                         if len(price_history) > 100:
                             price_history = price_history[-100:]
                         
-                        logger.info(f"WebSocket price update: {DEFAULT_SYMBOL} = {price}")
-                        
                         # Wait for 5 seconds before processing the next update
                         # This controls the update frequency
                         await asyncio.sleep(5)
@@ -550,33 +502,33 @@ async def get_symbol_price(symbol: str = DEFAULT_SYMBOL):
     price = get_current_price(symbol)
     return {"symbol": symbol, "price": price, "timestamp": datetime.now().isoformat()}
 
-# @app.get("/bot/start")
-# async def start_bot(background_tasks: BackgroundTasks):
-#     """Start the trading bot."""
-#     global bot_running
+@app.get("/bot/start")
+async def start_bot(background_tasks: BackgroundTasks):
+    """Start the trading bot."""
+    global bot_running
     
-#     if bot_running:
-#         return {"status": "already_running", "message": "Bot is already running"}
+    if bot_running:
+        return {"status": "already_running", "message": "Bot is already running"}
     
-#     bot_running = True
+    bot_running = True
     
-#     # Start the bot in a background thread
-#     bot_thread = threading.Thread(target=bot_loop)
-#     bot_thread.daemon = True
-#     bot_thread.start()
+    # Start the bot in a background thread
+    bot_thread = threading.Thread(target=bot_loop)
+    bot_thread.daemon = True
+    bot_thread.start()
     
-#     return {"status": "started", "message": "Trading bot started successfully"}
+    return {"status": "started", "message": "Trading bot started successfully"}
 
-# @app.get("/bot/stop")
-# async def stop_bot():
-#     """Stop the trading bot."""
-#     global bot_running
+@app.get("/bot/stop")
+async def stop_bot():
+    """Stop the trading bot."""
+    global bot_running
     
-#     if not bot_running:
-#         return {"status": "not_running", "message": "Bot is not running"}
+    if not bot_running:
+        return {"status": "not_running", "message": "Bot is not running"}
     
-#     bot_running = False
-#     return {"status": "stopped", "message": "Trading bot stopped successfully"}
+    bot_running = False
+    return {"status": "stopped", "message": "Trading bot stopped successfully"}
 
 @app.get("/websocket/start")
 async def start_websocket():
@@ -635,22 +587,15 @@ async def get_leverage_status(symbol: str = DEFAULT_SYMBOL):
     """Get current leverage settings for the specified symbol."""
     try:
         positions = client.futures_position_information(symbol=symbol)
-        
+
         for position in positions:
             if position['symbol'] == symbol:
-                return {
-                    "symbol": symbol,
-                    "current_leverage": int(position.get('leverage', 0)),
-                    "target_leverage": 2,
-                    "margin_type": position.get('marginType', 'Unknown'),
-                    "position_amount": float(position['positionAmt']),
-                    "timestamp": datetime.now().isoformat()
-                }
+                return position
                 
         # If no position found
         return {
             "symbol": symbol,
-            "current_leverage": "No position found",
+            "description": "No position found",
             "target_leverage": 2,
             "timestamp": datetime.now().isoformat()
         }
