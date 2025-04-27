@@ -143,39 +143,6 @@ def execute_trade(symbol: str, side: str, quantity: float, price: float) -> Trad
         logger.error(f"Error executing trade: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to execute trade: {str(e)}")
 
-
-def trading_logic(symbol: str = DEFAULT_SYMBOL) -> Optional[TradeSimulation]:
-    """Simple trading logic based on price movements."""
-    global price_history
-    
-    current_price = get_current_price(symbol)
-    timestamp = datetime.now().isoformat()
-    
-    # Record price
-    price_data = PriceData(symbol=symbol, price=current_price, timestamp=timestamp)
-    price_history.append(price_data)
-    
-    # Keep only the last 10 price points
-    if len(price_history) > 10:
-        price_history = price_history[-10:]
-    
-    # Simple trading logic: if we have at least 3 price points
-    if len(price_history) >= 3:
-        # Calculate simple moving average
-        avg_price = sum(p.price for p in price_history[-3:]) / 3
-        
-        # Buy if current price is below average (potential uptrend)
-        if current_price < avg_price * 0.995:
-            logger.info(f"Buy signal: current price {current_price} is below average {avg_price}")
-            return simulate_trade(symbol, "BUY", 0.001, current_price)
-        
-        # Sell if current price is above average (potential downtrend)
-        elif current_price > avg_price * 1.005:
-            logger.info(f"Sell signal: current price {current_price} is above average {avg_price}")
-            return simulate_trade(symbol, "SELL", 0.001, current_price)
-    
-    return None
-
 # Add this function to set and maintain leverage
 def set_and_verify_leverage(symbol="BTCUSDT", target_leverage=2):
     """Set and verify leverage for the specified symbol"""
@@ -480,12 +447,6 @@ def bot_loop():
 
             # Always verify leverage before trading
             enhanced_leverage_maintenance_task()
-
-            # Execute trading logic
-            trade_result = trading_logic()
-            
-            if trade_result:
-                logger.info(f"Simulated {trade_result.side} trade: {trade_result.quantity} {trade_result.symbol} at {trade_result.price}")
             
             # Sleep for 1 minute between checks
             time.sleep(60)
