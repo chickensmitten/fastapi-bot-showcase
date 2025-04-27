@@ -532,17 +532,17 @@ def start_websocket_in_thread():
 async def root():
     return {"message": "Welcome to the Binance Testnet Trading Bot API"}
 
-@app.get("/account", response_model=Dict)
-async def get_account_info():
-    """Get account information from Binance Testnet."""
-    try:
-        return client.futures_account()
-    except BinanceAPIException as e:
-        logger.error(f"Binance API error: {e}")
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error getting account info: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.get("/account", response_model=Dict)
+# async def get_account_info():
+#     """Get account information from Binance Testnet."""
+#     try:
+#         return client.futures_account()
+#     except BinanceAPIException as e:
+#         logger.error(f"Binance API error: {e}")
+#         raise HTTPException(status_code=e.status_code, detail=str(e))
+#     except Exception as e:
+#         logger.error(f"Error getting account info: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/price/{symbol}")
 async def get_symbol_price(symbol: str = DEFAULT_SYMBOL):
@@ -550,56 +550,33 @@ async def get_symbol_price(symbol: str = DEFAULT_SYMBOL):
     price = get_current_price(symbol)
     return {"symbol": symbol, "price": price, "timestamp": datetime.now().isoformat()}
 
-@app.get("/bot/start")
-async def start_bot(background_tasks: BackgroundTasks):
-    """Start the trading bot."""
-    global bot_running
+# @app.get("/bot/start")
+# async def start_bot(background_tasks: BackgroundTasks):
+#     """Start the trading bot."""
+#     global bot_running
     
-    if bot_running:
-        return {"status": "already_running", "message": "Bot is already running"}
+#     if bot_running:
+#         return {"status": "already_running", "message": "Bot is already running"}
     
-    bot_running = True
+#     bot_running = True
     
-    # Start the bot in a background thread
-    bot_thread = threading.Thread(target=bot_loop)
-    bot_thread.daemon = True
-    bot_thread.start()
+#     # Start the bot in a background thread
+#     bot_thread = threading.Thread(target=bot_loop)
+#     bot_thread.daemon = True
+#     bot_thread.start()
     
-    return {"status": "started", "message": "Trading bot started successfully"}
+#     return {"status": "started", "message": "Trading bot started successfully"}
 
-@app.get("/bot/stop")
-async def stop_bot():
-    """Stop the trading bot."""
-    global bot_running
+# @app.get("/bot/stop")
+# async def stop_bot():
+#     """Stop the trading bot."""
+#     global bot_running
     
-    if not bot_running:
-        return {"status": "not_running", "message": "Bot is not running"}
+#     if not bot_running:
+#         return {"status": "not_running", "message": "Bot is not running"}
     
-    bot_running = False
-    return {"status": "stopped", "message": "Trading bot stopped successfully"}
-
-@app.get("/bot/execute/{side}")
-async def execute_manual_trade(side: str, symbol: str = DEFAULT_SYMBOL, quantity: float = 0.001):
-    """Manually execute a trade with 2x leverage."""
-    if side.upper() not in ["BUY", "SELL"]:
-        raise HTTPException(status_code=400, detail="Side must be BUY or SELL")
-
-    # Ensure margin is isolated
-    set_margin_mode_isolated(symbol)
-
-    # Ensure leverage is set to 2x
-    set_and_verify_leverage(symbol, 2)
-    
-    current_price = get_current_price(symbol)
-    
-    # For real trading, use the execute_trade function
-    # For simulation, use the simulate_trade function
-    
-    # Uncomment the relevant line:
-    # trade = execute_trade(symbol, side.upper(), quantity, current_price)
-    trade = simulate_trade(symbol, side.upper(), quantity, current_price)
-    
-    return trade
+#     bot_running = False
+#     return {"status": "stopped", "message": "Trading bot stopped successfully"}
 
 @app.get("/websocket/start")
 async def start_websocket():
@@ -653,31 +630,6 @@ async def get_bot_status():
         latest_price_time=latest_price_time
     )
 
-@app.get("/bot/simulate/{side}")
-async def simulate_manual_trade(side: str, symbol: str = DEFAULT_SYMBOL, quantity: float = 0.001):
-    """Manually simulate a trade."""
-    if side.upper() not in ["BUY", "SELL"]:
-        raise HTTPException(status_code=400, detail="Side must be BUY or SELL")
-    
-    current_price = get_current_price(symbol)
-    trade = simulate_trade(symbol, side.upper(), quantity, current_price)
-    
-    return trade
-
-@app.get("/markets")
-async def get_exchange_info():
-    """Get information about available trading pairs."""
-    try:
-        exchange_info = client.get_exchange_info()
-        symbols = [s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING']
-        return {"trading_pairs": symbols}
-    except BinanceAPIException as e:
-        logger.error(f"Binance API error: {e}")
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error getting exchange info: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
 @app.get("/leverage/status")
 async def get_leverage_status(symbol: str = DEFAULT_SYMBOL):
     """Get current leverage settings for the specified symbol."""
@@ -688,9 +640,9 @@ async def get_leverage_status(symbol: str = DEFAULT_SYMBOL):
             if position['symbol'] == symbol:
                 return {
                     "symbol": symbol,
-                    "current_leverage": int(position['leverage']),
+                    "current_leverage": int(position.get('leverage', 0)),
                     "target_leverage": 2,
-                    "margin_type": position['marginType'],
+                    "margin_type": position.get('marginType', 'Unknown'),
                     "position_amount": float(position['positionAmt']),
                     "timestamp": datetime.now().isoformat()
                 }
