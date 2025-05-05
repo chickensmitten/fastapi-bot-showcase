@@ -1,4 +1,201 @@
-# Setup steps
+Below is a simple Markdown guide and high-level walkthrough for a Python trading bot that maintains a 2× leverage position on BTCUSDT using Binance’s Futures API.
+
+This bot automatically sets isolated margin, enforces 2× leverage on startup, periodically checks & rebalances leverage drift, streams live prices over WebSockets, and exposes a FastAPI for monitoring and control.
+
+## Overview
+
+This bot:
+
+- Connects to Binance Testnet futures  
+- Uses isolated margin with 2× leverage on BTCUSDT  
+- Automatically closes and reopens positions if leverage drifts beyond ±5%  
+- Streams live BTCUSDT prices via WebSockets  
+- Provides REST endpoints for price queries, bot status, and leverage status  
+
+## Prerequisites
+
+- Python 3.8+  
+- `python-dotenv`, `fastapi`, `uvicorn`, `binance` (official Python SDK), `schedule`  
+
+Store your API credentials in a `.env` file:
+```env
+BINANCE_API_KEY=your_api_key
+BINANCE_API_SECRET=your_api_secret
+```
+
+## Setup & Entry Point
+
+```bash
+pip install fastapi uvicorn python-dotenv python-binance schedule
+uvicorn main:app --reload
+```
+
+On startup (`@app.on_event("startup")`), the bot:
+
+1. Closes any existing BTCUSDT positions  
+2. Switches margin mode to ISOLATED  
+3. Sets 2× leverage  
+4. Opens a new 2× leveraged position using a default allocation  
+5. Starts a background thread to monitor and maintain leverage  
+6. Spins up a WebSocket thread for live price updates  
+
+## Code Walkthrough
+
+### 1. Imports & Logging
+
+```python
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from binance.client import Client
+from binance import AsyncClient, BinanceSocketManager
+import schedule, threading, asyncio, logging
+from pydantic import BaseModel
+from datetime import datetime
+import os
+from dotenv import load_dotenv
+```
+
+- Configures structured logging.  
+- Loads API keys from `.env`.  
+
+### 2. Client Initialization & Global State
+
+```python
+load_dotenv()
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+client = Client(API_KEY, API_SECRET, testnet=True)
+
+bot_running = False
+websocket_running = False
+price_history, trade_history = [], []
+latest_price, latest_price_time = None, None
+```
+
+- Uses Binance Testnet for safe development.  
+- Maintains in-memory state for prices, trades, and bot status.  
+
+### 3. Margin & Leverage Helpers
+
+```python
+def set_and_verify_leverage(symbol, target_leverage=2):
+    resp = client.futures_change_leverage(symbol=symbol, leverage=target_leverage)
+    return int(resp['leverage']) == target_leverage
+
+def set_margin_mode_isolated(symbol):
+    resp = client.futures_change_margin_type(symbol=symbol, marginType='ISOLATED')
+    return resp.get('code') == 200 or resp.get('msg') == 'success'
+```
+
+- `set_and_verify_leverage`: sets futures leverage and confirms.  
+- `set_margin_mode_isolated`: switches margin to ISOLATED, handling “already set” errors.  
+
+### 4. Position Management
+
+```python
+def close_all_btcusdt_positions():
+    positions = client.futures_position_information(symbol="BTCUSDT")
+    for p in positions:
+        amt = float(p['positionAmt'])
+        if amt != 0:
+            side = "SELL" if amt > 0 else "BUY"
+            client.futures_create_order(symbol="BTCUSDT", side=side, type="MARKET", quantity=abs(amt))
+            return True
+    return False
+
+def open_new_position_with_2x_leverage(direction="BUY", allocation_percentage=10):
+    set_and_verify_leverage("BTCUSDT", 2)
+    set_margin_mode_isolated("BTCUSDT")
+    account = client.futures_account()
+    allocation = float(account['availableBalance']) * (allocation_percentage / 100)
+    price = float(client.get_symbol_ticker(symbol="BTCUSDT")['price'])
+    size = round((allocation * 2) / price, 3)
+    client.futures_create_order(symbol="BTCUSDT", side=direction, type="MARKET", quantity=size)
+    return True
+```
+
+- Closes any open BTCUSDT position by placing an opposite market order.  
+- Opens a new position sized so that effective leverage equals 2× of the allocated balance.  
+
+### 5. Effective Leverage Calculation
+
+```python
+def calculate_effective_leverage(symbol="BTCUSDT"):
+    positions = client.futures_position_information(symbol=symbol)
+    for p in positions:
+        amt = abs(float(p['positionAmt']))
+        if amt == 0: continue
+        mark = float(p['markPrice'])
+        value = amt * mark
+        margin = float(p.get('isolatedWallet', value / int(p['leverage'])))
+        return value / margin
+    return 0
+```
+
+- Computes current effective leverage as (position value) / (margin used).  
+
+### 6. Leverage Maintenance Task
+
+```python
+def enhanced_leverage_maintenance_task():
+    lev = calculate_effective_leverage()
+    if lev == 0:
+        open_new_position_with_2x_leverage()
+    elif lev  2.1:
+        # Close and re-open to rebalance
+        close_all_btcusdt_positions()
+        maintain_position_value_with_2x_leverage(direction, previous_value)
+```
+
+- Runs every minute via `schedule`.  
+- Rebalances whenever leverage drifts outside 1.9×–2.1×.  
+
+### 7. WebSocket Price Streaming
+
+```python
+async def btcusdt_price_socket():
+    async_client = await AsyncClient.create(API_KEY, API_SECRET, testnet=True)
+    bsm = BinanceSocketManager(async_client)
+    async with bsm.symbol_ticker_socket("BTCUSDT") as ts:
+        while websocket_running:
+            msg = await ts.recv()
+            price = float(msg['c'])
+            timestamp = datetime.now().isoformat()
+            price_history.append({"price": price, "timestamp": timestamp})
+            latest_price, latest_price_time = price, timestamp
+            await asyncio.sleep(30)
+```
+
+- Streams real-time ticker updates.  
+- Stores the last 100 price points and updates `latest_price`.  
+
+### 8. FastAPI Endpoints
+
+- `/price/{symbol}`: current REST price fetch  
+- `/websocket/start` & `/stop`: control live price feed  
+- `/websocket/price`: latest WebSocket price  
+- `/bot/status`: returns bot and WebSocket status, recent prices/trades  
+- `/leverage/status`: current leverage and position details  
+
+All endpoints raise HTTP errors on API failures.
+
+### 9. Startup & Shutdown
+
+On startup (`@app.on_event("startup")`):
+
+- Closes old positions  
+- Sets isolated margin & 2× leverage  
+- Opens initial 2× position  
+- Starts leverage maintenance and WebSocket threads  
+
+On shutdown:
+
+- Gracefully stops the WebSocket stream  
+
+## Summary
+
+This bot provides a fully automated framework to keep a constant 2× leveraged futures position on BTCUSDT. It combines margin and leverage controls, position rebalancing logic, live price streaming, and a FastAPI interface for easy monitoring and control. Feel free to extend it with custom trading logic, error handling, or persistence layers to suit your production needs.
+
+## Setup Code
 
 ```
 python3 -m venv .venv
@@ -8,3 +205,7 @@ touch main.py
 fastapi dev main.py
 ```
 
+## TO DO
+
+### 1. Code clean up
+Move the code into the respective directories

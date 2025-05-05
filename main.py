@@ -183,7 +183,7 @@ def enhanced_leverage_maintenance_task():
                             logger.error("Failed to maintain position with 2x leverage")
                     break
         else:
-            logger.info(f"Current leverage {effective_leverage:.2f}x is within acceptable range of 2x target")
+            logger.info(f"Current leverage {effective_leverage:.2f}x is within acceptable range of 2x target. No Action required")
             
     except Exception as e:
         logger.error(f"Error in enhanced leverage maintenance task: {e}")
