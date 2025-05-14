@@ -593,8 +593,8 @@ async def startup_event():
     logger.info("Enhanced leverage maintenance service started")
 
     websocket_running = True
-    start_websocket_in_thread()
-    logger.info("WebSocket price stream started automatically on startup")
+    # start_websocket_in_thread()
+    # logger.info("WebSocket price stream started automatically on startup")
 
 # Stop the WebSocket stream when the application shuts down
 @app.on_event("shutdown")
