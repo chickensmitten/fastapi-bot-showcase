@@ -154,7 +154,7 @@ def enhanced_leverage_maintenance_task():
             return
             
         # If leverage has drifted more than 10% from target (1.9x to 2.1x acceptable range)
-        if effective_leverage is not None and (effective_leverage < 1.9 or effective_leverage > 2.1):
+        if effective_leverage is not None and (effective_leverage < 1.7 or effective_leverage > 2.2):
             logger.warning(f"Leverage drift detected! Current: {effective_leverage:.2f}x, Target: 2.00x")
             logger.info("Rebalancing position to maintain 2x leverage")
             
